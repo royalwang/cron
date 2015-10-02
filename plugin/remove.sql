@@ -1,0 +1,1 @@
+DELETE FROM events where (handler LIKE '%CronDockerDeployHandler@%') OR (handler LIKE '%CronMenuHandler@%') LIMIT 100

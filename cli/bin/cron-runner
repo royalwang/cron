@@ -1,0 +1,45 @@
+#!/usr/bin/env php
+<?php
+
+use App\Models\CronJob;
+use Minute\App\App;
+use Minute\Utils\OsUtils;
+
+require_once(preg_replace('!(^.*?vendor[/\\\\]).*!', '\1/autoload.php', $argv[0]));
+
+$app = App::getInstance();
+$app->config->setKey('site/cron/lastrun', time(), true);
+
+CronJob::$has_many = [['cronlog', 'order' => 'cron_log_id desc', 'limit' => 1, 'foreign_key' => 'cron_job_id', 'class_name' => 'CronLog']];
+
+if ($jobs = CronJob::find_all_by_enabled('y')) {
+    foreach ($jobs as $job) {
+        $lastJob     = $job->cronlog;
+        $lastRun     = !empty($lastJob[0]->created_at) ? strtotime($lastJob[0]->created_at->format()) : 0;
+        $lastElapsed = time() - $lastRun;
+
+        if ($job->timing === 'fixed_time') {
+            $runTodayAt = strtotime(sprintf('%s %s', date('Y-m-d'), $job->fixed_time));
+
+            if ((time() - $runTodayAt > 0) && (time() - $runTodayAt < 3600)) {
+                if ($lastElapsed >= (60 * 60 * 23)) {
+                    $run[] = $job;
+                }
+            }
+        } elseif ($job->timing === 'frequency') {
+            if (($job->frequency > 0) && ($lastElapsed > ($job->frequency * 60))) {
+                $run[] = $job;
+            }
+        }
+    }
+}
+
+if (!empty($run)) {
+    /** @var CronJob $job */
+    foreach ($run as $job) {
+        $args     = sprintf('-f "%s/script-runner" %d', dirname($argv[0]), $job->cron_job_id);
+        $instance = $job->create_direct_cronlog(['result' => 'pending']);
+
+        OsUtils::runBackgroundProcess('php', $args);
+    }
+}

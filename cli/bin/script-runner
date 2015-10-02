@@ -1,0 +1,115 @@
+<?php
+
+error_reporting(E_ALL);
+ini_set('display_errors', 'On');
+
+use App\Models\CronJob;
+use App\Models\CronLog;
+use App\Models\User;
+use GuzzleHttp\Client;
+use Minute\App\App;
+use Minute\Errors\ControllerError;
+use Minute\Routing\Controller;
+use Minute\Session\SessionManager;
+use Minute\User\UserManager;
+use Minute\Utils\Functions;
+use Minute\Utils\HttpUtils;
+use Minute\Utils\OsUtils;
+
+require_once(preg_replace('!(^.*?vendor[/\\\\]).*!', '\1/autoload.php', $argv[0]));
+
+$app = App::getInstance();
+
+if ($cron_job_id = round($argv[1])) {
+    CronJob::$has_one = [['cronlog', 'conditions' => 'result="pending"', 'foreign_key' => 'cron_job_id', 'class_name' => 'CronLog']];
+
+    if ($job = CronJob::find($cron_job_id)) {
+        if ($job->single_instance === 'y') {
+            OsUtils::exitIfAlreadyRunning();
+        }
+
+        $start_time = microtime();
+        $errors     = '';
+        $output     = '';
+
+        register_shutdown_function(function () use ($job, &$start_time, &$output, &$errors) {
+            $error = error_get_last();
+
+            if ($error['type'] === E_ERROR) {
+                $errors .= sprintf("\n%f: [FATAL] %s in %s at line %d", $start_time, $error['message'], $error['file'], $error['line']);
+            }
+
+            /** @var CronLog $log */
+            if ($log = $job->cronlog ?: $job->create_direct_cronlog()) {
+                $log->result     = empty($errors) ? 'pass' : 'fail';
+                $log->run_time   = microtime() - $start_time;
+                $log->output     = $output;
+                $log->exceptions = $errors;
+
+                $log->save_direct();
+            }
+
+            echo json_encode(['output' => $output, 'errors' => $errors]);
+        });
+
+        set_error_handler(function ($errno, $errstr, $error_file, $error_line, $error_context) {
+            global $errors, $start_time;
+            if (error_reporting() !== 0) {
+                $errors .= "\n$start_time: $errno, $errstr, $error_file, $error_line - " . var_export($error_context, true);
+            }
+        }, E_ALL);
+
+        if (preg_match('/action|script/', $job->type)) {
+            ob_start();
+
+            if (($job->type === 'action') && !empty($job->path)) {
+                try {
+                    $controller = new Controller($job->path);
+
+                    if ($controller->isCallable()) {
+                        $action    = $controller->getAction();
+                        $arguments = !empty($job->arguments) ? json_decode($job->arguments, true) : [];
+
+                        $output = Functions::call_user_function_hash($action, $arguments);
+                    } else {
+                        throw new ControllerError("Controller is not callable");
+                    }
+                } catch (Exception $e) {
+                    $errors .= "\n" . $e->getMessage();
+                }
+            } elseif (($job->type === 'script') && file_exists($job->path)) {
+                try {
+                    include($job->path);
+                } catch (Exception $e) {
+                    $errors .= "\n" . $e->getMessage();
+                }
+            }
+
+            $output = ob_get_contents();
+            ob_end_clean();
+        } else {
+            $client = new Client();
+
+            try {
+                $cookies = true;
+
+                if ($runAs = $job->arguments) {
+                    /** @var User $userClass */
+                    $userClass = UserManager::getInstance()->getUserModelClass();
+                    if ($user = filter_var($runAs, FILTER_VALIDATE_EMAIL) ? $userClass::find_by_email($runAs) : ($runAs > 0 ? $userClass::find($runAs) : null)) {
+                        $session = SessionManager::getInstance();
+                        $session->createSession($user);
+                        $cookies = $session->getSessionCookie();
+                    }
+                }
+
+                $request = $client->get(HttpUtils::prefixHostName($job->path), ['cookies' => $cookies]);
+                $output  = $request->getBody();
+            } catch (Exception $e) {
+                $errors .= "\n" . $e->getMessage();
+            }
+        }
+    }
+} else {
+    die("cron_job_id is required");
+}
