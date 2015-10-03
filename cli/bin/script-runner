@@ -16,7 +16,7 @@ use Minute\Utils\Functions;
 use Minute\Utils\HttpUtils;
 use Minute\Utils\OsUtils;
 
-require_once(preg_replace('!(^.*?vendor[/\\\\]).*!', '\1/autoload.php', $argv[0]));
+require_once(realpath(__DIR__ . "/../../../../autoload.php"));
 
 $app = App::getInstance();
 
